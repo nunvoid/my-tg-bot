@@ -1,140 +1,146 @@
 import { Bot } from "grammy";
+import { Database } from "bun:sqlite";
 
 const bot = new Bot("8633690309:AAFYg7AJRhdgggCz-RBssEYFA8hTAGAfbGE");
+const db = new Database("diet.db");
 
-const db: Record<number, any> = {};
+db.run(`
+  CREATE TABLE IF NOT EXISTS users (
+    telegram_id INTEGER PRIMARY KEY,
+    age INTEGER,
+    weight REAL,
+    height REAL,
+    sex TEXT,
+    activity_level REAL,
+    bmr REAL,
+    tdee REAL
+  )
+`);
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS meals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    raw_text TEXT,
+    calories_estimated REAL DEFAULT 0,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+const sessionState: Record<number, any> = {};
 
 bot.command("help", async (ctx) => {
     const helpMessage = `
-<b>Як користуватися цим ботом:</b>
+<b>Помічник дієтолога</b>
 
-Використовуй /set_profile — щоб ввести свої дані (вік, зріст, вагу).
-Використовуй /my_profile — щоб побачити свої збережені результати.
+Ось список доступних команд:
 
-<b>Що я рахую:</b>
-• <b>BMR</b> (Базовий обмін речовин) — скільки калорій організм спалює у стані спокою.
-• <b>TDEE</b> (Добова норма) — скільки калорій потрібно з урахуванням активності.
+<b>Профіль:</b>
+/set_profile — Створити або оновити свої дані (вік, вага, зріст). 
+/my_profile — Переглянути розраховані BMR та TDEE.
 
-<b>Важливо:</b> Якщо бот "завис" під час опитування, просто введи /set_profile заново.
+<b>Щоденник їжі:</b>
+/add_meal — Додати запис про те, що ви з'їли.
+/today — Показати список усіх прийомів їжі за сьогодні.
+
+<b>Як це працює?</b>
+Всі ваші записи зберігаються в базі даних <code>diet.db</code>. Навіть після перезапуску бота ваші дані будуть на місці!
+
+<i>Якщо ви почали вводити дані і хочете скасувати — просто виберіть іншу команду.</i>
     `;
-    
+
     await ctx.reply(helpMessage, { parse_mode: "HTML" });
 });
-const activityLevels: Record<string, number> = {
-    "low": 1.2,
-    "light": 1.375,
-    "medium": 1.55,
-    "high": 1.725
-};
 
-function calculateBMR(weight: number, height: number, age: number, sex: string): number {
-    if (sex === "male") {
-        return 10 * weight + 6.25 * height - 5 * age + 5;
-    }
-    return 10 * weight + 6.25 * height - 5 * age - 161;
+function calculateBMR(w: number, h: number, a: number, s: string) {
+    return s === "male" ? (10 * w + 6.25 * h - 5 * a + 5) : (10 * w + 6.25 * h - 5 * a - 161);
 }
 
-function calculateTDEE(bmr: number, activity: number): number {
-    return bmr * activity;
-}
-
-bot.command("start", (ctx) => {
-    ctx.reply("Привіт! Я допоможу розрахувати твою норму калорій. Використовуй /set_profile, щоб почати.");
-});
+bot.command("start", (ctx) => ctx.reply("Привіт! Я твій дієтолог з пам'яттю. Спробуй /set_profile або /add_meal."));
 
 bot.command("set_profile", (ctx) => {
+    sessionState[ctx.from!.id] = { step: "age" };
+    ctx.reply("Вкажіть ваш вік:");
+});
+bot.command("add_meal", (ctx) => {
+    sessionState[ctx.from!.id] = { step: "meal_text" };
+    ctx.reply("Що ви сьогодні їли?");
+});
+
+bot.command("today", (ctx) => {
     const userId = ctx.from!.id;
-    db[userId] = { step: "age" };
-    ctx.reply("Введіть ваш вік (число від 10 до 100):");
+    const today = new Date().toISOString().split('T')[0];
+    const meals = db.query("SELECT * FROM meals WHERE user_id = ? AND date(timestamp) = date('now')").all(userId) as any[];
+
+    if (meals.length === 0) {
+        return ctx.reply("Сьогодні ще немає записаних прийомів їжі.");
+    }
+
+    let report = "🍴 Сьогодні ви з'їли:\n";
+    meals.forEach((m, i) => {
+        const time = new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        report += `${i + 1}. ${m.raw_text} (${time})\n`;
+    });
+
+    ctx.reply(report);
 });
 
 bot.command("my_profile", (ctx) => {
-    const userId = ctx.from!.id;
-    const user = db[userId];
-
-    if (!user || !user.bmr) {
-        return ctx.reply("Профіль ще не заповнений. Використай /set_profile.");
-    }
-
-    ctx.reply(`📋 Ваш профіль:
-• Вік: ${user.age}
-• Зріст: ${user.height} см
-• Вага: ${user.weight} кг
-• Стать: ${user.sex === 'male' ? 'Чоловік' : 'Жінка'}
-• Активність (коеф): ${user.activity}
-
-Ваш BMR: ${user.bmr.toFixed(2)} ккал
-Ваш TDEE (норма): ${user.tdee.toFixed(2)} ккал`);
+    const user = db.query("SELECT * FROM users WHERE telegram_id = ?").get(ctx.from!.id) as any;
+    if (!user) return ctx.reply("Профіль не знайдено. /set_profile");
+    
+    ctx.reply(`📊 Ваш профіль:\nВік: ${user.age}\nВага: ${user.weight}кг\nBMR: ${user.bmr} ккал\nTDEE: ${user.tdee} ккал`);
 });
-
 
 bot.on("message:text", async (ctx) => {
     const userId = ctx.from!.id;
-    const user = db[userId];
+    const state = sessionState[userId];
+    if (!state) return;
 
-    if (!user || !user.step) return;
+    const text = ctx.message.text;
 
-    const text = ctx.message.text.toLowerCase();
+    // Логіка /set_profile
+    if (state.step === "age") {
+        state.age = parseInt(text);
+        state.step = "weight";
+        return ctx.reply("Ваша вага (кг):");
+    }
+    if (state.step === "weight") {
+        state.weight = parseFloat(text);
+        state.step = "height";
+        return ctx.reply("Ваш зріст (см):");
+    }
+    if (state.step === "height") {
+        state.height = parseFloat(text);
+        state.step = "sex";
+        return ctx.reply("Стать (male/female):");
+    }
+    if (state.step === "sex") {
+        state.sex = text.toLowerCase();
+        state.step = "activity";
+        return ctx.reply("Активність (1.2, 1.375, 1.55, 1.725):");
+    }
+    if (state.step === "activity") {
+        const activity = parseFloat(text);
+        const bmr = calculateBMR(state.weight, state.height, state.age, state.sex);
+        const tdee = bmr * activity;
 
-    if (user.step === "age") {
-        const age = parseInt(text);
-        if (isNaN(age) || age < 10 || age > 100) {
-            return ctx.reply("Помилка! Введіть число від 10 до 100.");
-        }
-        user.age = age;
-        user.step = "height";
-        return ctx.reply("Введіть ваш зріст у см (100-250):");
+        db.run(`
+            INSERT OR REPLACE INTO users (telegram_id, age, weight, height, sex, activity_level, bmr, tdee)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [userId, state.age, state.weight, state.height, state.sex, activity, bmr, tdee]
+        );
+
+        delete sessionState[userId];
+        return ctx.reply(` Профіль збережено в БД!\nTDEE: ${tdee.toFixed(2)} ккал`);
     }
 
-    if (user.step === "height") {
-        const height = parseInt(text);
-        if (isNaN(height) || height < 100 || height > 250) {
-            return ctx.reply("Помилка! Введіть число від 100 до 250.");
-        }
-        user.height = height;
-        user.step = "weight";
-        return ctx.reply("Введіть вашу вагу у кг (30-300):");
-    }
-
-    if (user.step === "weight") {
-        const weight = parseInt(text);
-        if (isNaN(weight) || weight < 30 || weight > 300) {
-            return ctx.reply("Помилка! Введіть число від 30 до 300.");
-        }
-        user.weight = weight;
-        user.step = "sex";
-        return ctx.reply("Вкажіть вашу стать (male / female):");
-    }
-
-    if (user.step === "sex") {
-        if (text !== "male" && text !== "female") {
-            return ctx.reply("Помилка! Напишіть 'male' або 'female':");
-        }
-        user.sex = text;
-        user.step = "activity";
-        return ctx.reply("Оберіть рівень активності:\nlow (1.2)\nlight (1.375)\nmedium (1.55)\nhigh (1.725)");
-    }
-
-    if (user.step === "activity") {
-        const activity = activityLevels[text];
-        if (!activity) {
-            return ctx.reply("Оберіть зі списку: low, light, medium або high.");
-        }
-        user.activity = activity;
-        
-        user.bmr = calculateBMR(user.weight, user.height, user.age, user.sex);
-        user.tdee = calculateTDEE(user.bmr, user.activity);
-        
-        user.step = null;
-
-        await ctx.reply("Дані збережено!");
-        return ctx.reply(`Твій результат:
-BMR (основний обмін): ${user.bmr.toFixed(2)} ккал
-TDEE (добова норма): ${user.tdee.toFixed(2)} ккал
-
-Використовуй /my_profile, щоб переглянути дані знову.`);
+    if (state.step === "meal_text") {
+        db.run("INSERT INTO meals (user_id, raw_text) VALUES (?, ?)", [userId, text]);
+        delete sessionState[userId];
+        return ctx.reply("Прийом їжі збережено ");
     }
 });
 
-console.log("Бот-дієтолог запущений...");
+console.log("Бот з базою SQLite запущений...");
 bot.start();
